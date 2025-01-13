@@ -16,11 +16,15 @@ const alg = {
     modulusLength: 1024,
 };
 
-function aesCrypt(key, data) {
-    var aesCtr = new aesjs.ModeOfOperation.ctr(new Uint8Array(key), new aesjs.Counter(1));
-    var encryptedBytes = aesCtr.encrypt(new Uint8Array(data));    
+function aesCrypt(key, data, counterDat) {
+    var bufWrite = key.update(data)
+    return bufWrite
+}
 
-    return encryptedBytes
+
+function aesDecrypt(key, data) {
+    var bufWrite = key.update(data)
+    return bufWrite
 }
 
 async function newCertificate(publicKey, privateKey) {
@@ -57,7 +61,7 @@ function encapsulate(num) {
     var len = Buffer.alloc(4)
     len.writeUInt32BE(num.length, 0)
     header = Buffer.concat([header, len])
-    return header
+    return Buffer.concat([header, Buffer.from(num)])
 }
 
 function sha256(data) {
@@ -84,8 +88,45 @@ function sha3_256(data) {
     return hash.digest()
 }
 
+function h(s, tweak) {
+    return sha3_256(Buffer.concat([encapsulate(tweak), s]))
+}
+
+function h_key_seed(s) {
+    return h(s, t_key_seed)
+}
+
+function h_verify(s) {
+    return h(s, t_verify)
+}
+
+function h_auth(s) {
+    return h(s, t_auth)
+}
+
 function mac(s, key, tweak) {
     return sha3_256(Buffer.concat([encapsulate(tweak), encapsulate(key), s]))
+}
+
+function kdfParse(m_expand, key_seed) {
+    var lenRequired = (20 * 2) + (16 * 2) + 20
+    var K = Buffer.alloc(0)
+    var index = 0
+    while (K.length < lenRequired) {
+        var hMacData = Buffer.concat([K, Buffer.from(m_expand), Buffer.from([index])])
+        var hMac = crypto.createHmac('sha256', key_seed)
+            .update(hMacData)
+            .digest()
+        K = Buffer.concat([K, hMac])
+        index += 1
+    }
+    return {
+        fowardDigest: K.slice(0, 20),
+        backwardDigest: K.slice(20, 40),
+        fowardKey: K.slice(40, 56),
+        backwardKey: K.slice(56, 72),
+        nonce: K.slice(72, 92)
+    }
 }
 
 var PROTOID = "ntor3-curve25519-sha3_256-1"
@@ -112,6 +153,10 @@ function kdf_phase1(s) {
     return kdf(s, t_msgkdf)
 }
 
+function kdf_final(s) {
+    return kdf(s, t_final)
+}
+
 DIGEST_LEN = 32
 ENC_KEY_LEN = 32
 PUB_KEY_LEN = 32
@@ -120,12 +165,10 @@ IDENTITY_LEN = 32
 MAC_KEY_LEN = 32
 
 function enc(data, key) {
-    const cipher = crypto.createCipheriv('aes-256-ctr', key, crypto.randomBytes(16));
-    cipher.setAutoPadding(false);
+    var aesCtr = new aesjs.ModeOfOperation.ctr(new Uint8Array(key), new aesjs.Counter(0));
+    var encryptedBytes = aesCtr.encrypt(new Uint8Array(data));    
 
-    var encrypted = cipher.update(data);
-    encrypted = Buffer.concat([encrypted, cipher.final()]);
-    return encrypted
+    return Buffer.from(encryptedBytes)
 }
 
 function method1(buf) {
@@ -165,37 +208,15 @@ class ByteSeq {
 }
 
 function generateKeys() {
-    var _id = ed25519.CURVE.randomBytes(32)
-    var _privateKeyEcLink = x25519.utils.randomPrivateKey()
-    var _publicKeyEcLink = x25519.getPublicKey(_privateKeyEcLink)
-    var _privateKeyEcSign = x25519.utils.randomPrivateKey()
-    var _publicKeyEcSign = x25519.getPublicKey(_privateKeyEcSign)
-    var _privateKeyRelaySign = x25519.utils.randomPrivateKey()
-    var _publicKeyRelaySign = x25519.getPublicKey(_privateKeyRelaySign)
-    const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
-        modulusLength: 1024,
-        publicExponent: 65537,
-    });
+    var _connectionKey = x25519.utils.randomPrivateKey()
+    var _connectionPublicKey = x25519.getPublicKey(_connectionKey)
     return {
         keys: {
-            signing: {
-                public: _publicKeyEcSign,
-                private: _privateKeyEcSign
-            },
-            relayId: {
-                public: _publicKeyRelaySign,
-                private: _privateKeyRelaySign
-            },
-            link: {
-                public: _publicKeyEcLink,
-                private: _privateKeyEcLink
-            },
-            rsa: {
-                private: privateKey,
-                public: publicKey
+            connection: {
+                public: _connectionPublicKey,
+                private: _connectionKey,
             }
         },
-        id: _id
     }
 }
 
@@ -261,9 +282,20 @@ module.exports = {
     sha256,
     sha1,
     timeToHours,
+    enc,
     aesCrypt,
+    aesDecrypt,
     sha1Incomplete,
     getTimeOneYearFromNow,
+    encapsulate,
+    kdf_phase1,
+    h_key_seed,
+    h_verify,
+    ByteSeq,
+    h_auth,
+    kdf_final,
+    mac_phase1,
+    kdfParse,
     fromKDF
 }
 

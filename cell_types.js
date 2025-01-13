@@ -3,7 +3,154 @@
 var crypto = require('crypto')
 var os = require('os')
 var utils = require('./crypto_utils')
+var { x25519  } = require('@noble/curves/ed25519')
+var { SHA3 } = require('sha3')
+var { ed25519 } = require('@noble/curves/ed25519')
+var { RelayCell } = require('./relayCell')
+var PROTOID = "ntor3-curve25519-sha3_256-1"
+var t_msgkdf = PROTOID + ":kdf_phase1"
+var t_msgmac = PROTOID + ":msg_mac"
+var t_key_seed = PROTOID + ":key_seed"
+var t_verify = PROTOID + ":verify"
+var t_final = PROTOID + ":kdf_final"
+var t_auth = PROTOID + ":auth_final"
 
+DIGEST_LEN = 32
+ENC_KEY_LEN = 32
+PUB_KEY_LEN = 32
+SEC_KEY_LEN = 32
+IDENTITY_LEN = 32
+
+MAC_KEY_LEN = 32
+MAC_LEN = DIGEST_LEN
+
+class CreatedCell {
+    constructor(circuit) {
+        this.circuit = circuit
+    }
+    parse(mainBody) {
+        var bodyLen = mainBody.readUint16BE()
+        var body = mainBody.slice(2, bodyLen+2)
+        var state = this.circuit.state
+        var curOffset = 0
+
+        var Y = body.slice(curOffset, curOffset+PUB_KEY_LEN)
+        curOffset += PUB_KEY_LEN
+
+        var AUTH = body.slice(curOffset, curOffset+DIGEST_LEN)
+        curOffset += DIGEST_LEN
+
+        var BODY = body.slice(curOffset)
+
+        var Yx = x25519.getSharedSecret(state.x, Y)
+        var secret_input = Buffer.concat([Yx, state.sharedExchange, state.serverRelayId, state.linkKey, state.X, Y, Buffer.from(PROTOID), utils.encapsulate(state.verification)])
+        var key_seed  = utils.h_key_seed(secret_input)
+        var verify = utils.h_verify(secret_input)
+
+        var auth_input = Buffer.concat([verify, state.serverRelayId, state.linkKey, Y, state.X, state.mac, utils.encapsulate(BODY), Buffer.from(PROTOID), Buffer.from("Server")])
+        
+        var kdf = utils.kdf_final(key_seed)
+        var key = kdf.take(PUB_KEY_LEN)
+
+
+        if (utils.h_auth(auth_input).toString('hex') == AUTH.toString('hex')) {
+            var keyData = kdf.take(kdf.remaining())
+            return {
+                fowardDigest: utils.sha1Incomplete(keyData.slice(0, 20)),
+                backwardDigest: utils.sha1Incomplete(keyData.slice(20, 40)),
+                fowardKey: crypto.createCipheriv('aes-128-ctr', keyData.slice(40, 56), Buffer.alloc(16)),
+                backwardKey: crypto.createDecipheriv('aes-128-ctr', keyData.slice(56, 72), Buffer.alloc(16)),
+                nonce: keyData.slice(72, 92)
+            }
+        }
+    }
+}
+
+class ExtendCell {
+    constructor() {
+        
+    }
+
+    build(data) {
+
+        var dataCell = Buffer.alloc(0)
+        var offset = 0
+
+        dataCell = addZeros(dataCell, 1)
+        dataCell.writeUint8(data.NSPEC.length, offset)
+        offset += 1
+
+        data.NSPEC.forEach(function(nspec) {
+            dataCell = addZeros(dataCell, 1)
+            dataCell.writeUint8(nspec.TYPE, offset)
+            offset += 1
+            dataCell = addZeros(dataCell, 1)
+            dataCell.writeUint8(nspec.DATA.length, offset)
+            offset += 1
+            dataCell = Buffer.concat([dataCell, nspec.DATA])
+            offset += nspec.DATA.length
+        })
+
+        return dataCell
+    }
+}
+
+class CreateCell {
+    constructor() {
+
+    }
+    genMainBody() {
+        return Buffer.alloc(1)
+    }
+    prepareBody(data) {
+        var x = data.connection.private
+        var X = data.connection.public
+        var linkKey = data.onionKey
+        var sharedExchange = x25519.getSharedSecret(x, linkKey)
+
+        var secretInputPhase1 = Buffer.concat([sharedExchange, data.serverRelayId, X, linkKey, Buffer.from(PROTOID), utils.encapsulate(data.verification)])
+        var phase1Keys = utils.kdf_phase1(secretInputPhase1)
+        var enc_key = phase1Keys.take(ENC_KEY_LEN)
+        var mac_key = phase1Keys.take(MAC_KEY_LEN)
+
+        var msg0 = Buffer.concat([data.serverRelayId, linkKey, X, utils.enc(this.genMainBody(), enc_key)])
+        var mac = utils.mac_phase1(msg0, mac_key)
+
+        var client_handshake = Buffer.concat([msg0, mac])
+
+        var state = {
+            x,
+            X,
+            sharedExchange,
+            serverRelayId: data.serverRelayId,
+            linkKey,
+            mac,
+            verification: data.verification
+        }
+
+
+        return {
+            client_handshake,
+            state
+        }
+    }
+    build(data) {
+        var offset = 0
+        var bufferData = Buffer.alloc(0)
+
+        bufferData = addZeros(bufferData, 2)
+        bufferData.writeUint16BE(0x0003, offset)
+        offset += 2
+
+        bufferData = addZeros(bufferData, 2)
+        bufferData.writeUint16BE(data.length, offset)
+        offset += 2
+
+        bufferData = Buffer.concat([bufferData, data])
+
+        return bufferData
+    }
+}
 
 class CreateFast {
     constructor() {
@@ -111,7 +258,7 @@ class NetInfo {
         mainBuf.writeUint8(mainData["OTHERADDR"]["Data"].length, curOffset)
         curOffset += 1
         mainBuf = Buffer.concat([mainBuf, mainData["OTHERADDR"]["Data"]])
-        curOffset += mainData["OTHERADDR"]["Data"].length
+        curOffset += Buffer.from(new Uint8Array([127, 0, 0, 1])).length
         mainBuf = addZeros(mainBuf, 1)
         mainBuf.writeUint8(mainData["MYADDR"].length, curOffset)
         curOffset += 1
@@ -158,7 +305,8 @@ class NetInfo {
 }
 
 class Cell {
-    constructor(isTrue) {
+    constructor(circuit, isTrue) {
+        this.circuit = circuit
         this._use4Len = isTrue
     }
 
@@ -231,11 +379,25 @@ class Cell {
                 var payloadLen = buf.readUint16BE(offset)
                 offset += 2
                 var payload = buf.slice(offset, offset+payloadLen)
-                totalParsedCircuitData[command] = this.parseCell(payload, command)
+                if (totalParsedCircuitData[command] != undefined) {
+                    if (!Array.isArray(totalParsedCircuitData[command])) {
+                        totalParsedCircuitData[command] = [totalParsedCircuitData[command]]
+                    }
+                    totalParsedCircuitData[command].push(this.parseCell(payload, command))
+                } else {
+                    totalParsedCircuitData[command] = this.parseCell(payload, command)
+                }
                 offset += payloadLen
             } else {
                 var payload = buf.slice(offset, offset+509)
-                totalParsedCircuitData[command] = this.parseCell(payload, command)
+                if (totalParsedCircuitData[command] != undefined) {
+                    if (!Array.isArray(totalParsedCircuitData[command])) {
+                        totalParsedCircuitData[command] = [totalParsedCircuitData[command]]
+                    }
+                    totalParsedCircuitData[command].push(this.parseCell(payload, command))
+                } else {
+                    totalParsedCircuitData[command] = this.parseCell(payload, command)
+                }
                 offset += 509
             }
             if ((buf.length-offset) <= 0) {
@@ -251,6 +413,7 @@ class Cell {
             if (longVer == true) {
                 buf = Buffer.alloc(7)
                 buf.writeUint32BE(id, 0)
+                buf.writeUint8(128, 0)
                 buf.writeUint8(type, 4)
                 buf.writeUint16BE(data.length, 5)   
             } else {
@@ -265,6 +428,7 @@ class Cell {
             if (longVer == true) {
                 buf = Buffer.alloc(5)
                 buf.writeUint32BE(id, 0)
+                buf.writeUint8(128, 0)
                 buf.writeUint8(type, 4)
             } else {
                 buf = Buffer.alloc(3)
@@ -282,20 +446,26 @@ class Cell {
         var totalParsedData = {}
         switch(command) {
             case 129:
-                var certs = new CERTS()
+                var certs = new CERTS(this.circuit)
                 return certs.parse(payload)
             case 130:
-                var auth = new AUTH_CHALLENGE()
+                var auth = new AUTH_CHALLENGE(this.circuit)
                 return auth.parse(payload)
             case 8:
                 var netInfo = new NetInfo()
                 return netInfo.parse(payload)
             case 7:
-                var versionInfo = new VersionCell()
+                var versionInfo = new VersionCell(this.circuit)
                 return versionInfo.parse(payload)
             case 6:
-                var createdInfo = new CreatedFast()
+                var createdInfo = new CreatedFast(this.circuit)
                 return createdInfo.parse(payload)
+            case 11:
+                var createdCell = new CreatedCell(this.circuit)
+                return createdCell.parse(payload)
+            case 3:
+                var relayCell = new RelayCell(this.circuit)
+                return relayCell.parse(payload)
         }
         return totalParsedData
     }
@@ -543,7 +713,10 @@ module.exports = {
     VersionCell,
     AUTH_CHALLENGE,
     AuthenticationCell,
+    ExtendCell,
     NetInfo,
+    CreateCell,
+    CreatedCell,
     CreateFast,
     Cell,
     addZeros
