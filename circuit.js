@@ -240,6 +240,18 @@ class Circuit {
             }
         })
     }
+    async connectToHost(hostname, port, streamId) {
+        return await request.connect(this, hostname, port, streamId)
+    }
+    async writeTLS(data, streamId) {
+        return await request.writeTLS(this, data, streamId)
+    }
+    async handleCallback(callback) {
+        request.handleCallback(this, callback)
+    }
+    async endRelayStream(streamId) {
+        request.endRelayStream(streamId)
+    }
     async connect() {
         this.time = new Date()
         try {
@@ -318,7 +330,6 @@ class Circuit {
                     this.insertKeyLayer(handshakeRes)
 
                     await this.finishCircuit()
-                    await request.connect(this, 'www.ibm.com', 80)
                     
                     this.finishedVal = true
                 }

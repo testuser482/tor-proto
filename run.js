@@ -11,7 +11,6 @@ async function run() {
             await main.tearDown()
         }
     }
-    console.log('done')
 }
 
 run()

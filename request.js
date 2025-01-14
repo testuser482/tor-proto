@@ -2,13 +2,13 @@ var { RelayCell } = require('./relayCell')
 var types = require('./cell_types')
 const HTTPTag = require('http-tag')
 
-async function connect(circuit, ip, port) {
+async function connect(circuit, ip, port, streamId) {
     var data = Buffer.concat([Buffer.from(ip), Buffer.from(":"), Buffer.from(port.toString()), Buffer.from([0])])
     console.log(data.toString())
     data = Buffer.concat([data, Buffer.alloc(1)])
     var resData = new RelayCell(circuit).buildBody({
         RelayCommand: 1,
-        StreamID: 2,
+        StreamID: streamId,
         Body: data
     })
     var response = new types.Cell(circuit, true).decodeCell(
@@ -16,46 +16,20 @@ async function connect(circuit, ip, port) {
             new types.Cell().buildCell(3, resData, circuit.circuitId, true)
         )
     )
-    console.log(new Uint8Array(response['3'].Body))
-    var resData2 = new RelayCell(circuit).buildBody({
-        RelayCommand: 2,
-        StreamID: 2,
-        Body: Buffer.from(HTTPTag`GET /us-en HTTP/1.1
-Host: www.ibm.com
-User-Agent: Mozilla/5.0
-Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
-Accept-Language: en-US,en;q=0.5
-Connection: keep-alive
-`)
-    })
-    var beforeDecrypt = undefined
-    circuit.socket.on('data', function(data) {
-        console.log(data)
-        callback = circuit.cellHandler.decodeCell(data)
-        if (callback['3'] != undefined) {
-            if (Array.isArray(callback['3'])) {
-                callback['3'].forEach(function(dat) {
-                    console.log(dat.returnData.Body.toString())        
-                })
-            } else {
-                beforeDecrypt = callback['3'].beforeDecrypt
-                console.log(callback['3'].returnData.Body.toString())        
-            }
-        } else {
-            if (callback['0'] != undefined) {
-
-            } else {
-                callback = new RelayCell(circuit).parse(data, beforeDecrypt)
-                console.log(callback.returnData.Body.toString())
-            }
-        }
-    })
-    circuit.socket.write(circuit.cellHandler.buildCell(3, resData2, circuit.circuitId, true))
-    
-
+    return response['3'].returnData.Body
 }
 
-async function resolveDNS(circuit, name) {
+async function endRelayStream(streamId) {
+    var resData2 = new RelayCell(circuit).buildBody({
+        RelayCommand: 3,
+        StreamID: streamId,
+        Body: Buffer.from([6])
+    })
+    
+    circuit.socket.write(circuit.cellHandler.buildCell(3, resData2, circuit.circuitId, true))
+}
+
+async function resolveDNS(circuit, name, streamId) {
     var name = Buffer.concat([Buffer.from(name), Buffer.from([0])])
     var resData = new RelayCell(circuit).buildBody({
         RelayCommand: 11,
@@ -66,7 +40,7 @@ async function resolveDNS(circuit, name) {
         await circuit.writeAndWaitForResponse(
             new types.Cell().buildCell(3, resData, circuit.circuitId, true)
         )
-    )['3'].Body
+    )['3'].returnData.Body
     var dnsAdressess = []
     var curOffset = 0
     while (true) {
@@ -77,16 +51,17 @@ async function resolveDNS(circuit, name) {
         var body = response.slice(curOffset, curOffset+bodyLen)
         curOffset += bodyLen
         if (type == 4) {
-            body = body.readUint8(0) + '.' + body.readUint8(1) + '.' + body.readUint8(2) + '.' + body.readUint8(3)
+            var bodyNew = body.readUint8(0) + '.' + body.readUint8(1) + '.' + body.readUint8(2) + '.' + body.readUint8(3)
             dnsAdressess.push({
                 type: 'ipv4',
-                address: body
+                address: bodyNew,
+                rawAddress: body
             })
         } else {
             if (type == 6) {
                 dnsAdressess.push({
                     type: 'ipv6',
-                    address: body
+                    rawAddress: body
                 })
             }
         }
@@ -99,7 +74,43 @@ async function resolveDNS(circuit, name) {
     return dnsAdressess
 }
 
+async function writeTLS(circuit, data, streamId) {
+    var resData2 = new RelayCell(circuit).buildBody({
+        RelayCommand: 2,
+        StreamID: streamId,
+        Body: data
+    })
+    
+    circuit.socket.write(circuit.cellHandler.buildCell(3, resData2, circuit.circuitId, true))
+}
+
+async function handleCallback(circuit, callback) {
+    circuit.socket.on('data', function(data) {
+        callbackThing = circuit.cellHandler.decodeCell(data)
+        if (callbackThing['3'] != undefined) {
+            if (Array.isArray(callbackThing['3'])) {
+                var totalData = Buffer.alloc(0)
+                callbackThing['3'].forEach(function(dat) {
+                    if (dat.returnData["RelayCommand"] == 2) {
+                        totalData = Buffer.concat([totalData, dat.returnData.Body])
+                    }
+                })
+                callback(totalData)
+
+            } else {
+                if (callbackThing['3'].returnData["RelayCommand"] == 2) {
+                    callback(callbackThing['3'].returnData.Body)
+                }
+            }
+        }
+    })
+
+}
+
 module.exports = {
     resolveDNS,
-    connect
+    connect,
+    endRelayStream,
+    handleCallback,
+    writeTLS
 }
