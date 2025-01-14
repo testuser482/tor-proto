@@ -58,7 +58,7 @@ const server = net.createServer((socket) => {
                         curCircuit.handleCallback(function(data) {
                             console.log('send back')
                             socket.write(data)
-                        })
+                        }, streamId)
                         socket.write(sendBack)
                     }
                 }

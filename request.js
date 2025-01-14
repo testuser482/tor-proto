@@ -1,6 +1,7 @@
 var { RelayCell } = require('./relayCell')
 var types = require('./cell_types')
 const HTTPTag = require('http-tag')
+var totalCallbacks = {}
 
 async function connect(circuit, ip, port, streamId) {
     var data = Buffer.concat([Buffer.from(ip), Buffer.from(":"), Buffer.from(port.toString()), Buffer.from([0])])
@@ -17,6 +18,38 @@ async function connect(circuit, ip, port, streamId) {
         )
     )
     return response['3'].returnData.Body
+}
+
+async function handleTotalCallbacks(callbackThing) {
+    if (callbackThing['3'] != undefined) {
+        if (Array.isArray(callbackThing['3'])) {
+            var totalDataForStreamId = {}
+            callbackThing['3'].forEach(function(dat) {
+                if (dat.returnData["RelayCommand"] == 2) {
+                    console.log('nope')
+                    if (totalCallbacks[dat.returnData["StreamID"]] != undefined) {
+                        if (totalDataForStreamId[dat.returnData["StreamID"]] != undefined) {
+                            totalDataForStreamId[dat.returnData["StreamID"]]  = Buffer.alloc(0)
+                        }
+                        totalDataForStreamId[dat.returnData["StreamID"]] = Buffer.concat([totalDataForStreamId[dat.returnData["StreamID"]], dat.returnData.Body])
+                    }
+                }
+            })
+            for (var key in totalDataForStreamId) {
+                if (totalCallbacks[key] != undefined) {
+                    totalCallbacks[key](totalDataForStreamId[key])
+                }
+            }
+        } else {
+            if (callbackThing['3'].returnData["RelayCommand"] == 2) {
+                console.log('nope')
+                if (totalCallbacks[callbackThing['3'].returnData["StreamID"]] != undefined) {
+                    totalCallbacks[callbackThing['3'].returnData["StreamID"]](callbackThing['3'].returnData.Body)
+                }
+            }
+        }
+    }
+    console.log('finitu')
 }
 
 async function endRelayStream(streamId) {
@@ -75,41 +108,61 @@ async function resolveDNS(circuit, name, streamId) {
 }
 
 async function writeTLS(circuit, data, streamId) {
-    var resData2 = new RelayCell(circuit).buildBody({
-        RelayCommand: 2,
-        StreamID: streamId,
-        Body: data
-    })
-    
-    circuit.socket.write(circuit.cellHandler.buildCell(3, resData2, circuit.circuitId, true))
-}
-
-async function handleCallback(circuit, callback) {
-    circuit.socket.on('data', function(data) {
-        callbackThing = circuit.cellHandler.decodeCell(data)
-        if (callbackThing['3'] != undefined) {
-            if (Array.isArray(callbackThing['3'])) {
-                var totalData = Buffer.alloc(0)
-                callbackThing['3'].forEach(function(dat) {
-                    if (dat.returnData["RelayCommand"] == 2) {
-                        totalData = Buffer.concat([totalData, dat.returnData.Body])
-                    }
+    if (data.length > 498) {
+        var len = (data.length/498)
+        var totalCircuitBody = Buffer.alloc(0)
+        if (len > Math.floor(len)) {
+            var curOffset = 0
+            for (var i = 0; i < Math.floor(len); i ++) {
+                var resData2 = new RelayCell(circuit).buildBody({
+                    RelayCommand: 2,
+                    StreamID: streamId,
+                    Body: data.slice(curOffset, curOffset+498)
                 })
-                callback(totalData)
-
-            } else {
-                if (callbackThing['3'].returnData["RelayCommand"] == 2) {
-                    callback(callbackThing['3'].returnData.Body)
-                }
+                curOffset += 498
+                
+                totalCircuitBody = Buffer.concat([totalCircuitBody, circuit.cellHandler.buildCell(3, resData2, circuit.circuitId, true)])
+            }
+            var resData2 = new RelayCell(circuit).buildBody({
+                RelayCommand: 2,
+                StreamID: streamId,
+                Body: data.slice(curOffset)
+            })
+            
+            totalCircuitBody = Buffer.concat([totalCircuitBody, circuit.cellHandler.buildCell(3, resData2, circuit.circuitId, true)])
+        } else {
+            var curOffset = 0
+            for (var i = 0; i < Math.floor(len); i ++) {
+                var resData2 = new RelayCell(circuit).buildBody({
+                    RelayCommand: 2,
+                    StreamID: streamId,
+                    Body: data.slice(curOffset, curOffset+498)
+                })
+                curOffset += 498
+                
+                totalCircuitBody = Buffer.concat([totalCircuitBody, circuit.cellHandler.buildCell(3, resData2, circuit.circuitId, true)])
             }
         }
-    })
+        circuit.socket.write(totalCircuitBody)
+    } else {
+        var resData2 = new RelayCell(circuit).buildBody({
+            RelayCommand: 2,
+            StreamID: streamId,
+            Body: data
+        })
 
+        circuit.socket.write(circuit.cellHandler.buildCell(3, resData2, circuit.circuitId, true))
+    }
+}
+
+async function handleCallback(circuit, callback, streamId) {
+    totalCallbacks[streamId] = callback
 }
 
 module.exports = {
     resolveDNS,
     connect,
+    handleTotalCallbacks,
     endRelayStream,
     handleCallback,
     writeTLS

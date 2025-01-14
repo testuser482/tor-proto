@@ -246,8 +246,8 @@ class Circuit {
     async writeTLS(data, streamId) {
         return await request.writeTLS(this, data, streamId)
     }
-    async handleCallback(callback) {
-        request.handleCallback(this, callback)
+    async handleCallback(callback, streamId) {
+        request.handleCallback(this, callback, streamId)
     }
     async endRelayStream(streamId) {
         request.endRelayStream(streamId)
@@ -269,7 +269,7 @@ class Circuit {
             this.finishedVal = false
             this.failedVal = false
 
-            this.socket.on('error', async () => {
+            this.socket.on('error', async (e) => {
                 this.failedVal = true
                 this.finishedVal = true
             })
@@ -280,6 +280,16 @@ class Circuit {
                 waitTime = true
                 this.socket.on('data', (res) => {
                     //console.log('recieved data ' + new Uint8Array(res))
+                    console.log(res.slice())
+                    try {
+                        var totalDat = new types.Cell(this, true).decodeCell(res.slice())
+                        if (totalDat['3'] != undefined) {
+                            console.log('found data')
+                            request.handleTotalCallbacks(totalDat)
+                        }
+                    } catch(e) {
+
+                    }
                     if (this.responseDataGot != undefined) {
                         this.responseDataGot(res)
                     }
@@ -289,7 +299,6 @@ class Circuit {
         
                 var buf = this.cellHandler.buildCell(7, new types.VersionCell([3,4,5]).build(), 0, false)
                 var parsedData = this.cellHandler.decodeCell(await this.writeAndWaitForResponse(buf))
-
                 if (parsedData['129'] == undefined) {
                     this.failedVal = true
                     this.finishedVal = true
@@ -359,6 +368,7 @@ class Circuit {
                 return false
             }
         } catch(e) {
+            console.log(e)
             console.log("Failed with error; retrying...")
             return false
         }
